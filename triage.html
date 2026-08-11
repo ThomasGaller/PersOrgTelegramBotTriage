@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Triage</title>
+<!--
+  Capture triage as a Telegram Mini App (v23 prototype).
+
+  A STATIC page — there is no backend. The bot is `run_polling` and has no
+  inbound port; this design keeps it that way:
+
+    bot  → builds  https://<host>/triage.html#<base64url JSON>
+           and opens it from a one-off REPLY-keyboard button (sendData is only
+           available to Mini Apps launched that way — an inline-keyboard button
+           would force a backend).
+    page → renders the form. The fragment is never sent to the host, so the
+           capture never leaves Telegram.
+    page → Telegram.WebApp.sendData(<edited JSON>) → arrives at the bot as
+           `message.web_app_data`, already authenticated by Telegram. No HMAC,
+           no TLS of your own, no exposed port.
+
+  The payload carries only what the form RENDERS. The session on the bot side
+  (`state.get_session(token)`) stays the source of truth for everything else —
+  details, section_hint, ref_now — so the reply is small (well under sendData's
+  4096-byte cap) and nothing is lost in the round trip.
+
+    out/in  {t: token, c: capture, g: grouped|null,
+             i: [{t: title, d: due, k: deadline, p: p1..p4, e: is_event, x: include}]}
+
+  Open it in a plain browser (no Telegram) and it loads a demo capture instead,
+  so the form can be judged before any of the wiring exists.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --fg: var(--tg-theme-text-color, #1a1a1a);
+    --hint: var(--tg-theme-hint-color, #8b8b8b);
+    --card: var(--tg-theme-secondary-bg-color, #f2f2f7);
+    --link: var(--tg-theme-link-color, #2f7bd6);
+    --btn: var(--tg-theme-button-color, #2f7bd6);
+    --btn-fg: var(--tg-theme-button-text-color, #ffffff);
+    --line: color-mix(in srgb, var(--hint) 28%, transparent);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: var(--tg-theme-bg-color, #17212b);
+      --fg: var(--tg-theme-text-color, #f5f5f5);
+      --card: var(--tg-theme-secondary-bg-color, #232e39);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px 12px 96px;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  h1 { font-size: 16px; margin: 4px 0 2px; }
+  .lede { color: var(--hint); font-size: 13px; margin: 0 0 14px; }
+  .card {
+    background: var(--card); border-radius: 12px;
+    padding: 10px 12px 12px; margin-bottom: 10px;
+    border: 1px solid transparent; transition: opacity .15s, border-color .15s;
+  }
+  .card.off { opacity: .42; }
+  .card.event { border-color: color-mix(in srgb, var(--link) 45%, transparent); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row + .row { margin-top: 8px; }
+  .grow { flex: 1; min-width: 0; }
+  label.inc { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--hint); }
+  input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--btn); margin: 0; flex: none; }
+  input[type=text], input[type=date], input[type=datetime-local] {
+    width: 100%; padding: 9px 10px; font: inherit;
+    color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 9px;
+  }
+  input:focus { outline: 2px solid var(--btn); outline-offset: -1px; }
+  .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  .seg button, .chip, .dest {
+    font: inherit; font-size: 13px; padding: 7px 11px; cursor: pointer;
+    color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 999px;
+  }
+  .seg button[aria-pressed=true] { background: var(--btn); color: var(--btn-fg); border-color: var(--btn); }
+  .dest { font-weight: 600; white-space: nowrap; }
+  .dest[data-event=true] { background: var(--link); color: #fff; border-color: var(--link); }
+  .lbl { font-size: 12px; color: var(--hint); margin-bottom: 4px; }
+  .flag { font-size: 12px; color: var(--hint); margin-top: 6px; }
+  .group {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+    padding: 10px 12px; border-radius: 12px;
+    border: 1px dashed var(--line); font-size: 14px;
+  }
+  .group[hidden] { display: none; }   /* display:flex would otherwise beat [hidden] */
+  #submit {
+    position: fixed; left: 12px; right: 12px; bottom: 12px;
+    padding: 14px; font: inherit; font-weight: 600;
+    color: var(--btn-fg); background: var(--btn);
+    border: 0; border-radius: 12px; cursor: pointer;
+  }
+  .tg #submit { display: none; }   /* inside Telegram the native MainButton submits */
+</style>
+</head>
+<body>
+
+<h1 id="head">Review the capture</h1>
+<p class="lede" id="lede">📅 goes to the calendar · ✅ goes to your list</p>
+<div id="group" class="group" hidden>
+  <input type="checkbox" id="grouped">
+  <label for="grouped" class="grow">File as <b>1 task + subtasks</b> (one deliverable)</label>
+</div>
+<div id="items"></div>
+<button id="submit">File them</button>
+
+<script>
+(function () {
+  "use strict";
+
+  // telegram-web-app.js defines Telegram.WebApp on ANY page, so its mere presence
+  // proves nothing — outside a Telegram client `platform` is "unknown". Checking
+  // the object alone would hide our own submit button behind a MainButton that
+  // can never render, leaving the page with no way to submit.
+  var api = window.Telegram && window.Telegram.WebApp;
+  var tg = (api && api.platform && api.platform !== "unknown") ? api : null;
+  var PRIOS = [["p1", "🔥"], ["p2", "⚡️"], ["p3", "📝"], ["p4", "🌱"]];
+  var CHIPS = [["Today", "today"], ["Tomorrow", "tomorrow"], ["Next week", "next monday"], ["No date", ""]];
+
+  // The demo capture a plain browser gets — enough to judge the form.
+  var DEMO = {
+    t: "demo", c: true, g: null,
+    i: [
+      {t: "Grassroots Peacebuilding via Model UN (hybrid)", d: "2026-08-13T10:00", k: null, p: "p2", e: true,  x: true},
+      {t: "Register for the Zoom session", d: "tomorrow", k: "2026-08-12", p: "p3", e: false, x: true},
+      {t: "Read the Debate-for-Peace briefing", d: "", k: null, p: "p3", e: false, x: false}
+    ]
+  };
+
+  function decode(hash) {
+    var raw = (hash || "").replace(/^#/, "");
+    if (!raw) return null;
+    var b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return JSON.parse(new TextDecoder().decode(bytes));   // UTF-8, so emoji survive
+  }
+
+  var payload;
+  try {
+    payload = decode(location.hash) || DEMO;
+  } catch (e) {
+    payload = DEMO;   // a truncated or mangled fragment must never blank the screen
+  }
+  var items = payload.i || [];
+
+  if (tg) {
+    document.body.classList.add("tg");
+    tg.ready();
+    tg.expand();
+  }
+
+  // -- render ---------------------------------------------------------------
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function dateControl(it, card) {
+    var wrap = el("div");
+    wrap.appendChild(el("div", "lbl", it.e ? "When" : "Due"));
+    if (it.e) {
+      // An event needs a real clock time — give it the native picker. An ALL-DAY
+      // event arrives as a bare "YYYY-MM-DD", which datetime-local cannot render:
+      // the field would sit empty while the date was in fact set. So a bare date
+      // gets a date picker, and either way an untouched value comes back exactly
+      // as it was shown, which is how the bot tells "unedited" from "edited".
+      var allDay = /^\d{4}-\d{2}-\d{2}$/.test(it.d || "");
+      var dtl = el("input");
+      dtl.type = allDay ? "date" : "datetime-local";
+      dtl.value = (it.d || "").slice(0, allDay ? 10 : 16);
+      dtl.addEventListener("change", function () { it.d = dtl.value; });
+      wrap.appendChild(dtl);
+    } else {
+      // A task keeps Todoist's natural language — the chips just fill it in.
+      var txt = el("input");
+      txt.type = "text";
+      txt.placeholder = "e.g. friday, next month, 9 jan";
+      txt.value = it.d || "";
+      txt.addEventListener("input", function () { it.d = txt.value.trim(); });
+      wrap.appendChild(txt);
+      var chips = el("div", "seg");
+      chips.style.marginTop = "6px";
+      CHIPS.forEach(function (c) {
+        var b = el("button", "chip", c[0]);
+        b.type = "button";
+        b.addEventListener("click", function () { it.d = c[1]; txt.value = c[1]; });
+        chips.appendChild(b);
+      });
+      wrap.appendChild(chips);
+    }
+    if (it.k) wrap.appendChild(el("div", "flag", "⚑ hard deadline " + it.k));
+    return wrap;
+  }
+
+  function buildCard(it, idx) {
+    var card = el("div", "card");
+    card.classList.toggle("off", !it.x);
+    card.classList.toggle("event", !!it.e);
+
+    // include + destination
+    var top = el("div", "row");
+    var inc = el("input");
+    inc.type = "checkbox";
+    inc.checked = !!it.x;
+    inc.id = "inc" + idx;
+    inc.addEventListener("change", function () {
+      it.x = inc.checked;
+      card.classList.toggle("off", !it.x);
+      paintSubmit();
+    });
+    var incLbl = el("label", "inc grow");
+    incLbl.htmlFor = inc.id;
+    incLbl.appendChild(inc);
+    incLbl.appendChild(el("span", null, "Item " + (idx + 1)));
+    var dest = el("button", "dest");
+    dest.type = "button";
+    dest.dataset.event = it.e ? "true" : "false";
+    dest.textContent = it.e ? "📅 Calendar" : "✅ Task";
+    dest.addEventListener("click", function () {
+      it.e = !it.e;
+      // The whole card is rebuilt: the destination decides both the date control
+      // and whether a priority row exists at all.
+      card.parentNode.replaceChild(buildCard(it, idx), card);
+      paintSubmit();
+    });
+    top.appendChild(incLbl);
+    top.appendChild(dest);
+    card.appendChild(top);
+
+    // title
+    var title = el("input");
+    title.type = "text";
+    title.value = it.t || "";
+    title.setAttribute("aria-label", "Title");
+    title.addEventListener("input", function () { it.t = title.value; });
+    var titleRow = el("div", "row");
+    titleRow.appendChild(title);
+    card.appendChild(titleRow);
+
+    // Priority is a task concept — a calendar entry has none, so don't offer it.
+    if (!it.e) {
+      var prioRow = el("div", "row");
+      var seg = el("div", "seg grow");
+      PRIOS.forEach(function (p) {
+        var b = el("button", null, p[1] + " " + p[0]);
+        b.type = "button";
+        b.setAttribute("aria-pressed", it.p === p[0] ? "true" : "false");
+        b.addEventListener("click", function () {
+          it.p = (it.p === p[0]) ? null : p[0];
+          seg.querySelectorAll("button").forEach(function (o, i) {
+            o.setAttribute("aria-pressed", PRIOS[i][0] === it.p ? "true" : "false");
+          });
+        });
+        seg.appendChild(b);
+      });
+      prioRow.appendChild(seg);
+      card.appendChild(prioRow);
+    }
+
+    card.appendChild(dateControl(it, card));
+    return card;
+  }
+
+  function render() {
+    var host = document.getElementById("items");
+    host.textContent = "";
+    items.forEach(function (it, idx) { host.appendChild(buildCard(it, idx)); });
+    paintSubmit();
+  }
+
+  // -- submit ---------------------------------------------------------------
+
+  function counts() {
+    var ev = 0, tk = 0;
+    items.forEach(function (it) { if (it.x) { it.e ? ev++ : tk++; } });
+    return {ev: ev, tk: tk};
+  }
+
+  function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+
+  function submitLabel() {
+    var c = counts();
+    if (document.getElementById("grouped").checked && payload.g) {
+      return "File as 1 task + " + plural(c.tk + c.ev - 1 < 0 ? 0 : c.tk + c.ev - 1, "subtask");
+    }
+    if (c.ev && c.tk) return "Add " + plural(c.ev, "event") + " + " + plural(c.tk, "task");
+    if (c.ev) return "Add " + plural(c.ev, "event") + " to the calendar";
+    if (c.tk) return (payload.c ? "File " : "Add ") + plural(c.tk, "task");
+    return "Nothing selected";
+  }
+
+  function paintSubmit() {
+    var label = submitLabel();
+    var live = counts().ev + counts().tk > 0;
+    document.getElementById("submit").textContent = label;
+    if (tg && tg.MainButton) {
+      tg.MainButton.setText(label);
+      live ? tg.MainButton.enable() : tg.MainButton.disable();
+      tg.MainButton.show();
+    }
+  }
+
+  function send() {
+    if (counts().ev + counts().tk === 0) return;
+    var out = {
+      t: payload.t,
+      g: payload.g ? document.getElementById("grouped").checked : null,
+      i: items.map(function (it) {
+        return {t: it.t, d: it.d || "", k: it.k || null, p: it.p || null,
+                e: !!it.e, x: !!it.x};
+      })
+    };
+    var body = JSON.stringify(out);
+    if (tg && tg.sendData) {
+      tg.sendData(body);          // closes the Mini App; the bot gets web_app_data
+    } else {
+      alert("Not running inside Telegram — this is what would be sent:\n\n" + body);
+    }
+  }
+
+  document.getElementById("submit").addEventListener("click", send);
+  if (tg && tg.MainButton) tg.MainButton.onClick(send);
+
+  // group toggle (only for a one-deliverable capture)
+  if (payload.g) {
+    var box = document.getElementById("group");
+    box.hidden = false;
+    var g = document.getElementById("grouped");
+    g.checked = payload.g.enabled !== false;
+    g.addEventListener("change", paintSubmit);
+  }
+
+  document.getElementById("head").textContent =
+    payload.c ? "📸 " + plural(items.length, "item") + " from that image" : "Review before adding";
+  if (!payload.c) document.getElementById("lede").textContent = "Tick what to add.";
+
+  // Re-label the button whenever a tick or destination changes.
+  document.addEventListener("change", paintSubmit);
+  document.addEventListener("click", function (e) {
+    if (e.target.closest(".dest")) paintSubmit();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
