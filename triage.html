@@ -10,10 +10,15 @@
   A STATIC page — there is no backend. The bot is `run_polling` and has no
   inbound port; this design keeps it that way:
 
-    bot  → builds  https://<host>/triage.html#<base64url JSON>
+    bot  → builds  https://<host>/triage.html?v=<wire>#p=<base64url JSON>
            and opens it from a one-off REPLY-keyboard button (sendData is only
            available to Mini Apps launched that way — an inline-keyboard button
            would force a backend).
+           The capture is a NAMED fragment param because Telegram writes its own
+           tgWebApp* params into the same fragment; `?v=` is a cache-buster only
+           (Telegram caches these pages hard) and never carries user data — the
+           query string IS sent to the host, which is exactly why the capture is
+           in the fragment instead.
     page → renders the form. The fragment is never sent to the host, so the
            capture never leaves Telegram.
     page → Telegram.WebApp.sendData(<edited JSON>) → arrives at the bot as
@@ -145,8 +150,22 @@
     ]
   };
 
-  function decode(hash) {
+  // THE FRAGMENT IS NOT OURS ALONE. Telegram writes its own tgWebApp* params
+  // into it when it opens a Mini App, so the capture has to be a NAMED param —
+  // "#p=<base64url>" — that can sit beside them. v26.0.0–v26.1.0 read the whole
+  // fragment, which threw the instant Telegram appended anything; the catch
+  // below then served the DEMO capture, so the form looked right and its submit
+  // came back carrying a token the bot had never issued ("that capture expired").
+  function fragmentPayload(hash) {
     var raw = (hash || "").replace(/^#/, "");
+    if (!raw) return null;
+    var named = new URLSearchParams(raw).get("p");
+    if (named) return named;
+    var first = raw.split("&")[0];      // pre-v26.1.1 bare fragment, still readable
+    return first.indexOf("=") === -1 ? first : null;
+  }
+
+  function decode(raw) {
     if (!raw) return null;
     var b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
     while (b64.length % 4) b64 += "=";
@@ -156,18 +175,36 @@
     return JSON.parse(new TextDecoder().decode(bytes));   // UTF-8, so emoji survive
   }
 
-  var payload;
+  var payload = null;
   try {
-    payload = decode(location.hash) || DEMO;
+    payload = decode(fragmentPayload(location.hash));
   } catch (e) {
-    payload = DEMO;   // a truncated or mangled fragment must never blank the screen
+    payload = null;   // a truncated or mangled fragment must never blank the screen
   }
+  // No fragment at all = someone opening the page directly; show the demo so the
+  // form can be judged. A fragment that EXISTS but carries no readable capture
+  // means Telegram opened us and the data did not survive — say so plainly.
+  // Serving the demo there is what turned this failure into a silent one: the
+  // form worked, and only the bot's reply revealed anything was wrong.
+  var lostData = !payload && !!(location.hash || "").replace(/^#/, "");
+  if (!payload) payload = DEMO;
   var items = payload.i || [];
 
   if (tg) {
     document.body.classList.add("tg");
     tg.ready();
     tg.expand();
+  }
+
+  if (lostData) {
+    document.getElementById("head").textContent = "⚠️ This form opened without its data";
+    document.getElementById("lede").textContent =
+      "Nothing was changed. Go back to the chat and tap the button again — " +
+      "and if it keeps happening, the list in the chat still does everything.";
+    document.getElementById("items").textContent = "";
+    document.getElementById("submit").style.display = "none";
+    if (tg && tg.MainButton) tg.MainButton.hide();
+    return;   // never offer a submit that can only be rejected
   }
 
   // -- render ---------------------------------------------------------------
