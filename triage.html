@@ -32,7 +32,7 @@
 
     out/in  {t: token, c: capture, g: grouped|null,
              cs: [calendar names the bot will accept],
-             i: [{t: title, d: due, n: end, l: location, c: calendar,
+             i: [{t: title, d: due, n: end, l: location, c: [calendars],
                   k: deadline, p: p1..p4, e: is_event, x: include}]}
 
   v26.1.0 added `n` (an event's end) and `l` (its place). The bot applies either
@@ -143,11 +143,11 @@
     t: "demo", c: true, g: null, cs: ["Personal", "HWPL Austria", "Private"],
     i: [
       {t: "Grassroots Peacebuilding via Model UN (hybrid)", d: "2026-08-13T10:00",
-       n: "2026-08-13T13:00", l: "Room CR1, C-Building", c: "HWPL Austria",
+       n: "2026-08-13T13:00", l: "Room CR1, C-Building", c: ["HWPL Austria"],
        k: null, p: "p2", e: true, x: true},
-      {t: "Register for the Zoom session", d: "tomorrow", n: "", l: "", c: "",
+      {t: "Register for the Zoom session", d: "tomorrow", n: "", l: "", c: [],
        k: "2026-08-12", p: "p3", e: false, x: true},
-      {t: "Read the Debate-for-Peace briefing", d: "", n: "", l: "", c: "",
+      {t: "Read the Debate-for-Peace briefing", d: "", n: "", l: "", c: [],
        k: null, p: "p3", e: false, x: false}
     ]
   };
@@ -339,19 +339,28 @@
     // own CAL_ROUTING rules) and sends the list it will accept; picking anything
     // outside that list is refused on arrival, so the options ARE the list.
     if (it.e && (payload.cs || []).length > 1) {
+        // MULTI-select (v26.3.0): an event can belong on several calendars, and
+        // the bot turns several targets into ONE invited event rather than
+        // separate copies. At least one must stay picked — an event with no
+        // calendar has nowhere to go.
+        if (!Array.isArray(it.c)) it.c = it.c ? [it.c] : [];
         var calWrap = el("div");
         calWrap.style.marginTop = "8px";
-        calWrap.appendChild(el("div", "lbl", "Calendar"));
+        calWrap.appendChild(el("div", "lbl", "Calendars"));
         var calSeg = el("div", "seg");
         payload.cs.forEach(function (name) {
           var b = el("button", "chip", name);
           b.type = "button";
-          b.setAttribute("aria-pressed", it.c === name ? "true" : "false");
+          b.setAttribute("aria-pressed", it.c.indexOf(name) !== -1 ? "true" : "false");
           b.addEventListener("click", function () {
-            it.c = name;
-            calSeg.querySelectorAll("button").forEach(function (o) {
-              o.setAttribute("aria-pressed", o.textContent === name ? "true" : "false");
-            });
+            var at = it.c.indexOf(name);
+            if (at !== -1) {
+              if (it.c.length === 1) return;   // the last one stays
+              it.c.splice(at, 1);
+            } else {
+              it.c.push(name);
+            }
+            b.setAttribute("aria-pressed", at !== -1 ? "false" : "true");
           });
           calSeg.appendChild(b);
         });
@@ -423,7 +432,8 @@
       g: payload.g ? document.getElementById("grouped").checked : null,
       i: items.map(function (it) {
         return {t: it.t, d: it.d || "", n: it.n || "", l: it.l || "",
-                c: it.c || "", k: it.k || null, p: it.p || null,
+                c: Array.isArray(it.c) ? it.c : (it.c ? [it.c] : []),
+                k: it.k || null, p: it.p || null,
                 e: !!it.e, x: !!it.x};
       })
     };
