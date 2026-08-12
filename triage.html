@@ -31,7 +31,8 @@
   4096-byte cap) and nothing is lost in the round trip.
 
     out/in  {t: token, c: capture, g: grouped|null,
-             i: [{t: title, d: due, n: end, l: location,
+             cs: [calendar names the bot will accept],
+             i: [{t: title, d: due, n: end, l: location, c: calendar,
                   k: deadline, p: p1..p4, e: is_event, x: include}]}
 
   v26.1.0 added `n` (an event's end) and `l` (its place). The bot applies either
@@ -139,13 +140,14 @@
 
   // The demo capture a plain browser gets — enough to judge the form.
   var DEMO = {
-    t: "demo", c: true, g: null,
+    t: "demo", c: true, g: null, cs: ["Personal", "HWPL Austria", "Private"],
     i: [
       {t: "Grassroots Peacebuilding via Model UN (hybrid)", d: "2026-08-13T10:00",
-       n: "2026-08-13T13:00", l: "Room CR1, C-Building", k: null, p: "p2", e: true, x: true},
-      {t: "Register for the Zoom session", d: "tomorrow", n: "", l: "",
+       n: "2026-08-13T13:00", l: "Room CR1, C-Building", c: "HWPL Austria",
+       k: null, p: "p2", e: true, x: true},
+      {t: "Register for the Zoom session", d: "tomorrow", n: "", l: "", c: "",
        k: "2026-08-12", p: "p3", e: false, x: true},
-      {t: "Read the Debate-for-Peace briefing", d: "", n: "", l: "",
+      {t: "Read the Debate-for-Peace briefing", d: "", n: "", l: "", c: "",
        k: null, p: "p3", e: false, x: false}
     ]
   };
@@ -332,6 +334,31 @@
 
     card.appendChild(dateControl(it, card));
 
+    // WHICH calendar (v26.2.0) — an event only, and only when there is a real
+    // choice. The bot has already routed one (from what the image says plus its
+    // own CAL_ROUTING rules) and sends the list it will accept; picking anything
+    // outside that list is refused on arrival, so the options ARE the list.
+    if (it.e && (payload.cs || []).length > 1) {
+        var calWrap = el("div");
+        calWrap.style.marginTop = "8px";
+        calWrap.appendChild(el("div", "lbl", "Calendar"));
+        var calSeg = el("div", "seg");
+        payload.cs.forEach(function (name) {
+          var b = el("button", "chip", name);
+          b.type = "button";
+          b.setAttribute("aria-pressed", it.c === name ? "true" : "false");
+          b.addEventListener("click", function () {
+            it.c = name;
+            calSeg.querySelectorAll("button").forEach(function (o) {
+              o.setAttribute("aria-pressed", o.textContent === name ? "true" : "false");
+            });
+          });
+          calSeg.appendChild(b);
+        });
+        calWrap.appendChild(calSeg);
+        card.appendChild(calWrap);
+    }
+
     // Where it happens (v26.1.0) — an event only; a task has no place. The bot
     // sends whatever the image stated ("Room CR1, C-Building", a join URL), and
     // this is the one chance to fix a mis-read room before it reaches the calendar.
@@ -396,7 +423,8 @@
       g: payload.g ? document.getElementById("grouped").checked : null,
       i: items.map(function (it) {
         return {t: it.t, d: it.d || "", n: it.n || "", l: it.l || "",
-                k: it.k || null, p: it.p || null, e: !!it.e, x: !!it.x};
+                c: it.c || "", k: it.k || null, p: it.p || null,
+                e: !!it.e, x: !!it.x};
       })
     };
     var body = JSON.stringify(out);
