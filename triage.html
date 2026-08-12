@@ -26,7 +26,12 @@
   4096-byte cap) and nothing is lost in the round trip.
 
     out/in  {t: token, c: capture, g: grouped|null,
-             i: [{t: title, d: due, k: deadline, p: p1..p4, e: is_event, x: include}]}
+             i: [{t: title, d: due, n: end, l: location,
+                  k: deadline, p: p1..p4, e: is_event, x: include}]}
+
+  v26.1.0 added `n` (an event's end) and `l` (its place). The bot applies either
+  only when the key is PRESENT, so a copy of this page cached from v26.0.0 keeps
+  working — its reply simply leaves both alone instead of clearing them.
 
   Open it in a plain browser (no Telegram) and it loads a demo capture instead,
   so the form can be judged before any of the wiring exists.
@@ -131,9 +136,12 @@
   var DEMO = {
     t: "demo", c: true, g: null,
     i: [
-      {t: "Grassroots Peacebuilding via Model UN (hybrid)", d: "2026-08-13T10:00", k: null, p: "p2", e: true,  x: true},
-      {t: "Register for the Zoom session", d: "tomorrow", k: "2026-08-12", p: "p3", e: false, x: true},
-      {t: "Read the Debate-for-Peace briefing", d: "", k: null, p: "p3", e: false, x: false}
+      {t: "Grassroots Peacebuilding via Model UN (hybrid)", d: "2026-08-13T10:00",
+       n: "2026-08-13T13:00", l: "Room CR1, C-Building", k: null, p: "p2", e: true, x: true},
+      {t: "Register for the Zoom session", d: "tomorrow", n: "", l: "",
+       k: "2026-08-12", p: "p3", e: false, x: true},
+      {t: "Read the Debate-for-Peace briefing", d: "", n: "", l: "",
+       k: null, p: "p3", e: false, x: false}
     ]
   };
 
@@ -186,6 +194,18 @@
       dtl.value = (it.d || "").slice(0, allDay ? 10 : 16);
       dtl.addEventListener("change", function () { it.d = dtl.value; });
       wrap.appendChild(dtl);
+      // The END (v26.1.0). The bot sends the window it will actually book — a
+      // poster's "10 AM - 1 PM" when it states one, otherwise the +1 hour default
+      // — so this is never a guess about what will happen, and never blank for a
+      // timed event. All-day events have no meaningful end to show.
+      if (!allDay) {
+        wrap.appendChild(el("div", "lbl", "Until"));
+        var endIn = el("input");
+        endIn.type = "datetime-local";
+        endIn.value = (it.n || "").slice(0, 16);
+        endIn.addEventListener("change", function () { it.n = endIn.value; });
+        wrap.appendChild(endIn);
+      }
     } else {
       // A task keeps Todoist's natural language — the chips just fill it in.
       var txt = el("input");
@@ -274,6 +294,22 @@
     }
 
     card.appendChild(dateControl(it, card));
+
+    // Where it happens (v26.1.0) — an event only; a task has no place. The bot
+    // sends whatever the image stated ("Room CR1, C-Building", a join URL), and
+    // this is the one chance to fix a mis-read room before it reaches the calendar.
+    if (it.e) {
+      var place = el("div");
+      place.style.marginTop = "8px";
+      place.appendChild(el("div", "lbl", "Where"));
+      var loc = el("input");
+      loc.type = "text";
+      loc.placeholder = "room, address, or a meeting link";
+      loc.value = it.l || "";
+      loc.addEventListener("input", function () { it.l = loc.value; });
+      place.appendChild(loc);
+      card.appendChild(place);
+    }
     return card;
   }
 
@@ -322,8 +358,8 @@
       t: payload.t,
       g: payload.g ? document.getElementById("grouped").checked : null,
       i: items.map(function (it) {
-        return {t: it.t, d: it.d || "", k: it.k || null, p: it.p || null,
-                e: !!it.e, x: !!it.x};
+        return {t: it.t, d: it.d || "", n: it.n || "", l: it.l || "",
+                k: it.k || null, p: it.p || null, e: !!it.e, x: !!it.x};
       })
     };
     var body = JSON.stringify(out);
